@@ -13,20 +13,37 @@ class InvoiceForm(forms.ModelForm):
         widgets = {
             'customer': forms.Select(attrs={'class': 'form-select'}),
         }
-# Formset: permite agregar MÚLTIPLES detalles dentro de UNA factura
-# extra=3: muestra 3 filas vacías para agregar productos
-# can_delete=True: permite eliminar filas
+
+class InvoiceDetailForm(forms.ModelForm):
+    """Formulario para línea de detalle. El precio se bloquea al valor del producto."""
+    class Meta:
+        model = InvoiceDetail
+        fields = ['product', 'quantity', 'unit_price']
+        widgets = {
+            'product': forms.Select(attrs={'class': 'form-select detail-product'}),
+            'quantity': forms.NumberInput(attrs={'class': 'form-control detail-quantity', 'min': 1}),
+            'unit_price': forms.NumberInput(attrs={
+                'class': 'form-control detail-price',
+                'step': '0.01',
+                'readonly': 'readonly',
+                'tabindex': '-1',
+            }),
+        }
+
+    def clean(self):
+        cleaned_data = super().clean()
+        product = cleaned_data.get('product')
+        # Siempre forzar el precio del producto, ignorando lo que venga del POST
+        if product:
+            cleaned_data['unit_price'] = product.unit_price
+        return cleaned_data
+
 InvoiceDetailFormSet = inlineformset_factory(
-    Invoice,           # Modelo padre
-    InvoiceDetail,     # Modelo hijo
-    fields=['product', 'quantity', 'unit_price'],
-    extra=3,           # 3 filas vacías para agregar
-    can_delete=True,   # Checkbox para eliminar filas
-    widgets={
-        'product': forms.Select(attrs={'class': 'form-select'}),
-        'quantity': forms.NumberInput(attrs={'class': 'form-control', 'min': 1}),
-        'unit_price': forms.NumberInput(attrs={'class': 'form-control', 'step': '0.01'}),
-    }
+    Invoice,
+    InvoiceDetail,
+    form=InvoiceDetailForm,
+    extra=3,
+    can_delete=True,
 )
 
 class SignUpForm(UserCreationForm):

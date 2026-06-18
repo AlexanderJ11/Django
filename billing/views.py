@@ -5,6 +5,7 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.views.generic import ListView, CreateView, UpdateView, DeleteView
 from django.urls import reverse_lazy
 from django.contrib.auth import login
+from django.http import JsonResponse
 from .models import *
 from .forms import SignUpForm, BrandForm, InvoiceForm, InvoiceDetailFormSet
 from shared.mixins import StaffRequiredMixin, ExportMixin
@@ -196,23 +197,54 @@ def invoice_list(request):
     return render(request, 'billing/invoice_list.html', {'items': invoices})
 
 @login_required
+def product_api(request, pk):
+    """Devuelve precio y stock de un producto en JSON para el formulario de factura."""
+    product = get_object_or_404(Product, pk=pk, is_active=True)
+    return JsonResponse({'price': str(product.unit_price), 'stock': product.stock})
+
+@login_required
 def invoice_create(request):
     """Crea factura con sus líneas de detalle."""
     if request.method == 'POST':
         form = InvoiceForm(request.POST)
         formset = InvoiceDetailFormSet(request.POST)
         if form.is_valid() and formset.is_valid():
-            invoice = form.save(commit=False)
-            invoice.save()
-            formset.instance = invoice
-            formset.save()
-            subtotal = sum(d.subtotal for d in invoice.details.all())
-            invoice.subtotal = subtotal
-            invoice.tax = subtotal * Decimal('0.15')
-            invoice.total = invoice.subtotal + invoice.tax
-            invoice.save()
-            messages.success(request, f'Invoice #{invoice.id} created! Total: ${invoice.total}')
-            return redirect('billing:invoice_list')
+            # Validar stock antes de guardar
+            stock_errors = []
+            for detail_form in formset:
+                cd = detail_form.cleaned_data
+                if not cd or cd.get('DELETE'):
+                    continue
+                product = cd.get('product')
+                quantity = cd.get('quantity') or 0
+                if product and quantity > 0:
+                    if quantity > product.stock:
+                        stock_errors.append(
+                            f'Stock insuficiente para "{product.name}": '
+                            f'solicitado {quantity}, disponible {product.stock}.'
+                        )
+
+            if stock_errors:
+                for msg in stock_errors:
+                    messages.error(request, msg)
+            else:
+                invoice = form.save(commit=False)
+                invoice.save()
+                formset.instance = invoice
+                formset.save()
+
+                # Reducir stock de cada producto
+                for detail in invoice.details.all():
+                    detail.product.stock -= detail.quantity
+                    detail.product.save(update_fields=['stock'])
+
+                subtotal = sum(d.subtotal for d in invoice.details.all())
+                invoice.subtotal = subtotal
+                invoice.tax = subtotal * Decimal('0.15')
+                invoice.total = invoice.subtotal + invoice.tax
+                invoice.save()
+                messages.success(request, f'Factura #{invoice.id} creada. Total: ${invoice.total}')
+                return redirect('billing:invoice_list')
     else:
         form = InvoiceForm()
         formset = InvoiceDetailFormSet()
