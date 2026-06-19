@@ -4,3 +4,4 @@ sqlparse==0.5.5
 tzdata==2026.2
 openpyxl==3.1.5
 reportlab==4.5.1
+Pillow==11.2.1

@@ -49,6 +49,7 @@ class Product(models.Model):
     brand = models.ForeignKey(Brand, on_delete=models.PROTECT, related_name='products')
     group = models.ForeignKey(ProductGroup, on_delete=models.PROTECT, related_name='products')
     suppliers = models.ManyToManyField(Supplier, related_name='products', blank=True)
+    image = models.ImageField(upload_to='products/', blank=True, null=True, verbose_name='Image')
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     stock = models.IntegerField(default=0)
     is_active = models.BooleanField(default=True)
@@ -59,6 +60,10 @@ class Product(models.Model):
         verbose_name_plural = 'Products'
         ordering = ['name']
     def __str__(self): return f'{self.name} ({self.brand.name})'
+
+    @property
+    def balance(self):
+        return self.unit_price * self.stock
 
 class Customer(models.Model):
     """Clientes. OneToOne con CustomerProfile."""
