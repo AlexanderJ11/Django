@@ -2,12 +2,14 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.views.generic import ListView, CreateView, UpdateView, DeleteView
+from django.views.generic import ListView, CreateView, UpdateView, DeleteView, DetailView
 from django.urls import reverse_lazy
 from django.contrib.auth import login
+import json
+from django.http import JsonResponse
 from .models import *
-from .forms import SignUpForm, BrandForm, InvoiceForm, InvoiceDetailFormSet
-from shared.mixins import StaffRequiredMixin, ExportMixin
+from .forms import SignUpForm, BrandForm, InvoiceForm, InvoiceDetailFormSet, ProductForm
+from shared.mixins import StaffRequiredMixin, ExportMixin, _get_field_value
 from shared.decorators import audit_action
 from decimal import Decimal
 
@@ -110,6 +112,23 @@ class SupplierDeleteView(LoginRequiredMixin, StaffRequiredMixin, DeleteView):
 
 
 # === PRODUCT (CBV) ===
+
+# All configurable columns: (key, export_label, export_accessor)
+PRODUCT_ALL_COLUMNS = [
+    ('image',      'Imagen',          lambda obj: obj.image.name.split('/')[-1] if obj.image else 'Sin imagen'),
+    ('name',       'Nombre',          'name'),
+    ('brand',      'Marca',           'brand__name'),
+    ('group',      'Grupo',           'group__name'),
+    ('unit_price', 'Precio',          lambda obj: f'${obj.unit_price}'),
+    ('stock',      'Stock',           'stock'),
+    ('balance',    'Balance',         lambda obj: f'${obj.balance:.2f}'),
+    ('is_active',  'Estado',          lambda obj: 'Activo' if obj.is_active else 'Inactivo'),
+    ('suppliers',  'Proveedores',     lambda obj: ', '.join(s.name for s in obj.suppliers.all())),
+    ('created_at', 'Fecha creación',  lambda obj: obj.created_at.strftime('%Y-%m-%d')),
+]
+PRODUCT_DEFAULT_COLS = ['image', 'name', 'brand', 'group', 'unit_price', 'stock', 'balance', 'is_active', 'suppliers']
+
+
 class ProductListView(LoginRequiredMixin, ExportMixin, ListView):
     model = Product
     template_name = 'billing/product_list.html'
@@ -117,15 +136,31 @@ class ProductListView(LoginRequiredMixin, ExportMixin, ListView):
     paginate_by = 10
     export_filename = 'products'
     export_title    = 'Product List'
-    export_fields   = [
-        ('Name',      'name'),
-        ('Brand',     'brand__name'),
-        ('Group',     'group__name'),
-        ('Price',     'unit_price'),
-        ('Stock',     'stock'),
-        ('Status',    lambda obj: 'Active' if obj.is_active else 'Inactive'),
-        ('Suppliers', lambda obj: ', '.join(s.name for s in obj.suppliers.all())),
-    ]
+
+    def _get_active_cols(self):
+        """Returns list of column keys: from ?cols= param (exports), session, or default."""
+        cols_param = self.request.GET.get('cols', '').strip()
+        if cols_param:
+            valid = {c[0] for c in PRODUCT_ALL_COLUMNS}
+            keys = [k for k in cols_param.split(',') if k in valid]
+            if keys:
+                return keys
+        return self.request.session.get('product_visible_cols', PRODUCT_DEFAULT_COLS)
+
+    def _get_export_data(self):
+        """Build (headers, rows) using only the currently active columns."""
+        active_keys = self._get_active_cols()
+        col_map = {key: (label, acc) for key, label, acc in PRODUCT_ALL_COLUMNS}
+        headers, accessors = [], []
+        for key in active_keys:
+            if key in col_map:
+                label, acc = col_map[key]
+                headers.append(label)
+                accessors.append(acc)
+        rows = []
+        for obj in self.get_queryset():
+            rows.append([str(_get_field_value(obj, acc)) for acc in accessors])
+        return headers, rows
 
     def get_queryset(self):
         qs = Product.objects.select_related('brand', 'group').prefetch_related('suppliers')
@@ -155,17 +190,34 @@ class ProductListView(LoginRequiredMixin, ExportMixin, ListView):
         ctx['brands'] = Brand.objects.order_by('name')
         ctx['groups'] = ProductGroup.objects.order_by('name')
         ctx['suppliers_list'] = Supplier.objects.order_by('name')
-        # q sin 'page' para armar URLs de paginación con filtros preservados
         params = self.request.GET.copy()
         params.pop('page', None)
         ctx['q'] = params
+        active_cols = self._get_active_cols()
+        # Passed to Django template (for checkbox iteration)
+        ctx['all_cols_for_template'] = [(key, label) for key, label, _ in PRODUCT_ALL_COLUMNS]
+        # JSON-serializable versions for JS
+        ctx['all_cols_js']    = [[key, label] for key, label, _ in PRODUCT_ALL_COLUMNS]
+        ctx['default_cols_js'] = PRODUCT_DEFAULT_COLS
+        ctx['active_cols_js']  = active_cols
         return ctx
 
+class ProductDetailView(LoginRequiredMixin, DetailView):
+    model = Product
+    template_name = 'billing/product_detail.html'
+    context_object_name = 'product'
+
 class ProductCreateView(LoginRequiredMixin, CreateView):
-    model = Product; fields = ['name', 'description', 'brand', 'group', 'suppliers', 'unit_price', 'stock', 'is_active']; template_name = 'billing/product_form.html'; success_url = reverse_lazy('billing:product_list')
+    model = Product
+    form_class = ProductForm
+    template_name = 'billing/product_form.html'
+    success_url = reverse_lazy('billing:product_list')
 
 class ProductUpdateView(LoginRequiredMixin, UpdateView):
-    model = Product; fields = ['name', 'description', 'brand', 'group', 'suppliers', 'unit_price', 'stock', 'is_active']; template_name = 'billing/product_form.html'; success_url = reverse_lazy('billing:product_list')
+    model = Product
+    form_class = ProductForm
+    template_name = 'billing/product_form.html'
+    success_url = reverse_lazy('billing:product_list')
 
 class ProductDeleteView(LoginRequiredMixin, StaffRequiredMixin, DeleteView):
     model = Product; template_name = 'billing/product_confirm_delete.html'; success_url = reverse_lazy('billing:product_list')
@@ -196,23 +248,70 @@ def invoice_list(request):
     return render(request, 'billing/invoice_list.html', {'items': invoices})
 
 @login_required
+def product_api(request, pk):
+    """Devuelve precio y stock de un producto en JSON para el formulario de factura."""
+    product = get_object_or_404(Product, pk=pk, is_active=True)
+    return JsonResponse({'price': str(product.unit_price), 'stock': product.stock})
+
+@login_required
+def product_column_config(request):
+    """GET: return session column config. POST: save column selection to session."""
+    valid_keys = {c[0] for c in PRODUCT_ALL_COLUMNS}
+    if request.method == 'POST':
+        try:
+            cols = json.loads(request.body).get('cols', [])
+        except (json.JSONDecodeError, ValueError):
+            cols = []
+        cols = [c for c in cols if c in valid_keys]
+        if cols:
+            request.session['product_visible_cols'] = cols
+            request.session.modified = True
+        return JsonResponse({'ok': True, 'cols': cols})
+    return JsonResponse({'cols': request.session.get('product_visible_cols', PRODUCT_DEFAULT_COLS)})
+
+@login_required
 def invoice_create(request):
     """Crea factura con sus líneas de detalle."""
     if request.method == 'POST':
         form = InvoiceForm(request.POST)
         formset = InvoiceDetailFormSet(request.POST)
         if form.is_valid() and formset.is_valid():
-            invoice = form.save(commit=False)
-            invoice.save()
-            formset.instance = invoice
-            formset.save()
-            subtotal = sum(d.subtotal for d in invoice.details.all())
-            invoice.subtotal = subtotal
-            invoice.tax = subtotal * Decimal('0.15')
-            invoice.total = invoice.subtotal + invoice.tax
-            invoice.save()
-            messages.success(request, f'Invoice #{invoice.id} created! Total: ${invoice.total}')
-            return redirect('billing:invoice_list')
+            # Validar stock antes de guardar
+            stock_errors = []
+            for detail_form in formset:
+                cd = detail_form.cleaned_data
+                if not cd or cd.get('DELETE'):
+                    continue
+                product = cd.get('product')
+                quantity = cd.get('quantity') or 0
+                if product and quantity > 0:
+                    if quantity > product.stock:
+                        stock_errors.append(
+                            f'Stock insuficiente para "{product.name}": '
+                            f'solicitado {quantity}, disponible {product.stock}.'
+                        )
+
+            if stock_errors:
+                for msg in stock_errors:
+                    messages.error(request, msg)
+            else:
+                invoice = form.save(commit=False)
+                invoice.save()
+                formset.instance = invoice
+                formset.save()
+
+                # Reducir stock de cada producto
+                for detail in invoice.details.all():
+                    detail.product.stock -= detail.quantity
+                    detail.product.save(update_fields=['stock'])
+
+                subtotal = sum(d.subtotal for d in invoice.details.all())
+                invoice.subtotal = subtotal
+                invoice.tax = subtotal * Decimal('0.15')
+                invoice.total = invoice.subtotal + invoice.tax
+                invoice.save()
+                messages.success(request, f'Factura #{invoice.id} creada. Total: ${invoice.total}')
+                return redirect('billing:invoice_list')
     else:
         form = InvoiceForm()
         formset = InvoiceDetailFormSet()

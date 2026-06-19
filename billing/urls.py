@@ -24,6 +24,8 @@ urlpatterns = [
     # Product
     path('products/', views.ProductListView.as_view(), name='product_list'),
     path('products/create/', views.ProductCreateView.as_view(), name='product_create'),
+    path('products/column-config/', views.product_column_config, name='product_column_config'),
+    path('products/<int:pk>/', views.ProductDetailView.as_view(), name='product_detail'),
     path('products/<int:pk>/edit/', views.ProductUpdateView.as_view(), name='product_update'),
     path('products/<int:pk>/delete/', views.ProductDeleteView.as_view(), name='product_delete'),
     # Customer
@@ -37,5 +39,7 @@ urlpatterns = [
     path('invoices/create/', views.invoice_create, name='invoice_create'),
     path('invoices/<int:pk>/', views.invoice_detail, name='invoice_detail'),
     path('invoices/<int:pk>/delete/', views.invoice_delete, name='invoice_delete'),
+    # API interna para obtener precio y stock de un producto
+    path('api/product/<int:pk>/', views.product_api, name='product_api'),
 
 ]
